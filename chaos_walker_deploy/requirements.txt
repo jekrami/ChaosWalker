@@ -1,0 +1,12 @@
+# ChaosWalker v1.2 Python Dependencies
+# Writer: J.Ekrami, Co-writer: Claude Sonnet 4.5
+# Date: 2026-01-06
+
+# Flask Web Dashboard
+flask>=3.0.0
+
+# Configuration parsing
+toml>=0.10.2
+
+# Note: smart_mapper.py is included in the repository
+# No external dependencies needed for Smart Mapper functionality
