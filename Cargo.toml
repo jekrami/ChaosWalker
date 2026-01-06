@@ -1,0 +1,14 @@
+[package]
+name = "chaos_walker"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# We use 0.18.2 which SUPPORTS 'cuda-version-from-build-system'
+cudarc = { version = "0.18.2", features = ["cuda-version-from-build-system", "driver", "nvrtc"] }
+sha2 = "0.10"
+hex = "0.4"
+anyhow = "1.0"
+
+[build-dependencies]
+cc = "1.0"
