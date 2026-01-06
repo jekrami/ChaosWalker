@@ -1,0 +1,18 @@
+# ChaosWalker Configuration
+
+# The target SHA-256 hash to crack
+# Default: "VDKdrAQ5"
+target_hash = "cbc9bb1ec6e18f55707b997f675fa7427f656e9484e3cbbe981cbf090620f1d9"
+
+# Number of keys to check per GPU cycle
+# Higher values increase GPU utilization but may cause system lag
+batch_size = 10000000
+
+# Path to the compiled PTX kernel file
+gpu_ptx_path = "./kernels/chaos_worker.ptx"
+
+# Path to the checkpoint file
+checkpoint_file = "chaos_state.txt"
+
+# Time in seconds between auto-saves
+checkpoint_interval_secs = 30

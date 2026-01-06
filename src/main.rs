@@ -5,17 +5,45 @@ use std::time::{Instant, Duration};
 use std::fs;
 use std::io::{self, Write};
 use std::path::Path;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::thread;
 
 // --- CONFIGURATION ---
-const BATCH_SIZE: usize = 10_000_000; // Keys to check per GPU cycle
-const GPU_PTX_PATH: &str = "./kernels/chaos_worker.ptx";
-const CHECKPOINT_FILE: &str = "chaos_state.txt";
-const CHECKPOINT_INTERVAL_SECS: u64 = 30; // Save every 30 seconds
+use serde::Deserialize;
+
+// --- CONFIGURATION STRUCT ---
+#[derive(Deserialize, Clone)]
+struct Config {
+    target_hash: String,
+    batch_size: usize,
+    gpu_ptx_path: String,
+    checkpoint_file: String,
+    checkpoint_interval_secs: u64,
+    known_password_length: usize,
+}
+
+// --- LENGTH OPTIMIZATION ---
+
+/// Calculate the starting index for passwords of a specific length
+/// This allows skipping all shorter passwords when length is known
+fn calculate_start_offset(known_length: usize) -> u64 {
+    if known_length <= 1 {
+        return 0;
+    }
+    
+    let mut offset = 0u64;
+    for len in 1..known_length {
+        // Use saturating_add to prevent overflow for very large lengths
+        offset = offset.saturating_add(95u64.pow(len as u32));
+    }
+    offset
+}
 
 // --- CHECKPOINT SYSTEM ---
 
 /// Save the current search state to disk
-fn save_checkpoint(current_index: u64, total_checked: u64, target_hex: &str) -> io::Result<()> {
+fn save_checkpoint(filename: &str, current_index: u64, total_checked: u64, target_hex: &str) -> io::Result<()> {
     let checkpoint_data = format!(
         "# ChaosWalker Checkpoint File\n\
          # DO NOT EDIT MANUALLY\n\
@@ -30,20 +58,20 @@ fn save_checkpoint(current_index: u64, total_checked: u64, target_hex: &str) -> 
     );
 
     // Write atomically: write to temp file, then rename
-    let temp_file = format!("{}.tmp", CHECKPOINT_FILE);
+    let temp_file = format!("{}.tmp", filename);
     fs::write(&temp_file, checkpoint_data)?;
-    fs::rename(&temp_file, CHECKPOINT_FILE)?;
+    fs::rename(&temp_file, filename)?;
 
     Ok(())
 }
 
 /// Load the checkpoint from disk, if it exists
-fn load_checkpoint() -> Option<(u64, u64, String)> {
-    if !Path::new(CHECKPOINT_FILE).exists() {
+fn load_checkpoint(filename: &str) -> Option<(u64, u64, String)> {
+    if !Path::new(filename).exists() {
         return None;
     }
 
-    let content = match fs::read_to_string(CHECKPOINT_FILE) {
+    let content = match fs::read_to_string(filename) {
         Ok(c) => c,
         Err(_) => return None,
     };
@@ -72,127 +100,226 @@ fn load_checkpoint() -> Option<(u64, u64, String)> {
     }
 }
 
-fn main() -> Result<(), anyhow::Error> {
-    println!("--- Project ChaosWalker: Initiating High-Performance Mode ---");
-
-    // 1. CONNECT TO GPU (Using CudaContext for cudarc 0.18+)
-    let ctx = CudaContext::new(0)?;
+fn worker_thread(
+    device_id: usize,
+    config: Config,
+    global_index: Arc<AtomicU64>,
+    found_flag: Arc<AtomicBool>,
+    result_store: Arc<Mutex<Option<u64>>>,
+    ptx_content: String,
+) -> Result<(), anyhow::Error> {
+    // 1. Connect to specific GPU
+    let ctx = CudaContext::new(device_id as usize)?;
     let stream = ctx.default_stream();
-    println!("GPU Connected: RTX 3090 active.");
-
-    // 2. LOAD KERNEL
-    // We load the compiled PTX file.
-    // Ensure your build.rs has compiled the NEW C++ code before running this!
-    let ptx = Ptx::from_file(GPU_PTX_PATH);
+    
+    // 2. Load Kernel
+    let ptx = Ptx::from_src(&ptx_content);
     let module = ctx.load_module(ptx)?;
     let kernel = module.load_function("crack_kernel")?;
 
-    // 3. DEFINE TARGET
-    // ChaosWalker v1.0 with Smart Mapper
-    // Test password: "VDKdrAQ5" (will be found at ~119K linear index)
-    let target_hex = "c30c9a521a08ba8613d80d866ed07f91d347ceb1c2dafe5f358ef9244918b3d4";
-    let target_bytes = hex::decode(target_hex)?;
-
-    // Convert target to u32 array (Big Endian)
+    // 3. Prepare Target
+    let target_bytes = hex::decode(&config.target_hash)?;
     let mut target_u32 = [0u32; 8];
     for i in 0..8 {
         let chunk = &target_bytes[i*4..(i+1)*4];
         target_u32[i] = u32::from_be_bytes(chunk.try_into()?);
     }
 
-    // 4. ALLOCATE MEMORY ON GPU
-    // We only need buffers for the Target (Input) and the Result (Output).
-    // We DO NOT need a buffer for the indices anymore (saving massive bandwidth).
-    let mut dev_found = stream.alloc_zeros::<u64>(1)?;
+    // 4. Allocate Memory
+    // Initialize to sentinel value (max u64) so we can detect when index 0 is found
+    let sentinel = vec![u64::MAX];
+    let mut dev_found = stream.clone_htod(&sentinel)?;
     let dev_target = stream.clone_htod(&target_u32)?;
+    let cfg = LaunchConfig::for_num_elems(config.batch_size as u32);
 
-    // 5. CHECK FOR CHECKPOINT (Resume from previous run)
-    let (mut current_linear_index, mut total_checked) = if let Some((saved_index, saved_total, saved_hash)) = load_checkpoint() {
-        if saved_hash == target_hex {
-            println!();
-            println!("📂 CHECKPOINT FOUND!");
-            println!("   Resuming from: {}", saved_index);
-            println!("   Already checked: {} passwords", saved_total);
-            println!();
-            (saved_index, saved_total)
-        } else {
-            println!();
-            println!("⚠️  Checkpoint found but target hash changed. Starting fresh.");
-            println!();
-            (0, 0)
-        }
-    } else {
-        println!();
-        println!("🆕 No checkpoint found. Starting from beginning.");
-        println!();
-        (0, 0)
-    };
+    let batch_size_u64 = config.batch_size as u64;
 
-    println!("Target loaded. Engine started.");
-    println!("Batch Size: {} keys/cycle", BATCH_SIZE);
-    println!("Checkpoint: Saving every {} seconds to {}", CHECKPOINT_INTERVAL_SECS, CHECKPOINT_FILE);
-    println!();
-
-    let start_time = Instant::now();
-    let mut last_checkpoint_time = Instant::now();
-
-    let cfg = LaunchConfig::for_num_elems(BATCH_SIZE as u32);
-
-    // --- THE ATTACK LOOP ---
+    // 5. Work Loop
     loop {
-        // Launch the Kernel
-        // The GPU calculates the Feistel permutation itself now.
-        unsafe {
-            stream.launch_builder(&kernel)
-                .arg(&current_linear_index)    // Arg 1: Start Index (Scalar)
-                .arg(&mut dev_found)           // Arg 2: Found Flag (Pointer)
-                .arg(&dev_target)              // Arg 3: Target Hash (Pointer)
-                .arg(&(BATCH_SIZE as i32))     // Arg 4: Count (Scalar)
-                .launch(cfg)?;
-        }
-
-        // Check Results (Async copy back)
-        // We only read back 8 bytes per million keys! Very fast.
-        let found_val = stream.clone_dtoh(&dev_found)?;
-        
-        if found_val[0] != 0 {
-            let winning_random_index = found_val[0];
-            println!("\n\n!!! SUCCESS !!!");
-            println!("Target Found at Random Index: {}", winning_random_index);
-            println!("(Use: python3 decode_result.py {} to get the password)", winning_random_index);
-
-            // Delete checkpoint on success
-            let _ = fs::remove_file(CHECKPOINT_FILE);
-            println!("\n✅ Checkpoint deleted (search complete)");
+        if found_flag.load(Ordering::Relaxed) {
             break;
         }
 
-        // Progress
-        total_checked += BATCH_SIZE as u64;
-        current_linear_index += BATCH_SIZE as u64;
+        // Grab a batch of work
+        let start_index = global_index.fetch_add(batch_size_u64, Ordering::Relaxed);
 
-        // Auto-save checkpoint every N seconds
-        if last_checkpoint_time.elapsed() >= Duration::from_secs(CHECKPOINT_INTERVAL_SECS) {
-            if let Err(e) = save_checkpoint(current_linear_index, total_checked, target_hex) {
-                eprintln!("\n⚠️  Warning: Failed to save checkpoint: {}", e);
-            } else {
-                print!(" [💾 Saved]");
-                io::stdout().flush().ok();
-            }
-            last_checkpoint_time = Instant::now();
+        // Run Kernel
+        unsafe {
+            stream.launch_builder(&kernel)
+                .arg(&start_index)
+                .arg(&mut dev_found)
+                .arg(&dev_target)
+                .arg(&(config.batch_size as i32))
+                .launch(cfg)?;
         }
 
-        // Progress display
-        if total_checked % (BATCH_SIZE as u64 * 50) == 0 {
-            let elapsed = start_time.elapsed().as_secs_f64();
-            let speed = total_checked as f64 / elapsed / 1_000_000.0;
-            print!("\rChecked: {:.1} M | Speed: {:.2} M/sec | Offset: {}",
-                total_checked as f64 / 1_000_000.0,
+        // IMPORTANT: Synchronize context before reading result!
+        ctx.synchronize()?;
+
+        // Check Result
+        let found_val = stream.clone_dtoh(&dev_found)?;
+
+        // Check if value changed from sentinel (meaning password was found)
+        if found_val[0] != u64::MAX {
+            // Found it!
+            found_flag.store(true, Ordering::SeqCst);
+            let mut lock = result_store.lock().unwrap();
+            *lock = Some(found_val[0]);
+            break;
+        }
+    }
+
+    Ok(())
+}
+
+fn main() -> Result<(), anyhow::Error> {
+    println!("--- Project ChaosWalker v1.2: Multi-GPU Edition ---");
+
+    // 0. LOAD CONFIGURATION
+    let config_content = fs::read_to_string("config.toml")
+        .map_err(|_| anyhow::anyhow!("Could not find config.toml"))?;
+    let config: Config = toml::from_str(&config_content)?;
+    
+    // 1. DISCOVER GPUS
+    // We try to connect to device 0 to see if it works, then count 
+    // In cudarc 0.18, we can just try to iterate.
+    // Helper via nvml or driver is safer, but let's assume at least 1 and try to connect.
+    // Actually cudarc doesn't expose device_count() directly on top level easily without init.
+    // We will just use a loop to detect.
+    
+    let mut device_ids = Vec::new();
+    for i in 0..8 {
+        if CudaContext::new(i).is_ok() {
+            device_ids.push(i);
+        } else {
+            break;
+        }
+    }
+
+    if device_ids.is_empty() {
+        anyhow::bail!("No CUDA devices found!");
+    }
+
+    println!("Detected {} CUDA Device(s)", device_ids.len());
+
+    // 2. LENGTH OPTIMIZATION
+    let length_offset = calculate_start_offset(config.known_password_length);
+    if config.known_password_length > 0 {
+        println!("🎯 Length optimization enabled: {} characters", config.known_password_length);
+        println!("   Skipping first {} passwords (lengths 1-{})", 
+                 length_offset, config.known_password_length - 1);
+        
+        // Calculate time saved
+        let seconds_saved = length_offset as f64 / 1_300_000_000.0; // @ 1.3 GH/s
+        if seconds_saved < 60.0 {
+            println!("   Time saved: {:.1} seconds", seconds_saved);
+        } else if seconds_saved < 3600.0 {
+            println!("   Time saved: {:.1} minutes", seconds_saved / 60.0);
+        } else if seconds_saved < 86400.0 {
+            println!("   Time saved: {:.1} hours", seconds_saved / 3600.0);
+        } else {
+            println!("   Time saved: {:.1} days", seconds_saved / 86400.0);
+        }
+    }
+
+    // 3. CHECKPT / STATE
+    let (start_linear_index, previous_total_checked) = if let Some((saved_index, saved_total, saved_hash)) = load_checkpoint(&config.checkpoint_file) {
+        if saved_hash == config.target_hash {
+            println!("📂 Resuming from checkpoint: {}", saved_index);
+            (saved_index, saved_total)
+        } else {
+            println!("⚠️ Target changed. Starting fresh.");
+            (0, 0)
+        }
+    } else {
+        (0, 0)
+    };
+
+    // Shared State (apply length offset)
+    let actual_start_index = start_linear_index + length_offset;
+    let global_index = Arc::new(AtomicU64::new(actual_start_index));
+    let found_flag = Arc::new(AtomicBool::new(false));
+    let result_store = Arc::new(Mutex::new(None));
+
+    // Pre-load PTX content once
+    // Note: Ptx::from_file actually reads file content. We need to pass content or path to threads.
+    // Ptx::from_file returns a Ptx struct. We can't clone it easily to threads if it holds pointers.
+    // Best to read file locally and pass string content.
+    // Wait, Ptx::from_file simply reads the file. Let's read it manually to be safe.
+    let ptx_src = fs::read_to_string(&config.gpu_ptx_path)?;
+
+    // 3. SPAWN WORKERS
+    let mut handles = vec![];
+    for dev_id in device_ids {
+        let cfg = config.clone();
+        let idx = global_index.clone();
+        let f = found_flag.clone();
+        let res = result_store.clone();
+        let src = ptx_src.clone();
+        
+        let handle = thread::spawn(move || {
+            if let Err(e) = worker_thread(dev_id, cfg, idx, f, res, src) {
+                eprintln!("GPU {} Error: {}", dev_id, e);
+            }
+        });
+        handles.push(handle);
+    }
+
+    println!("Engine started. {} workers active.", handles.len());
+
+    // 4. MONITOR LOOP
+    let start_time = Instant::now();
+    let mut last_ckpt = Instant::now();
+    
+    // We need to track how much we've done for speed calc
+    // global_index moves forward.
+    
+    loop {
+        thread::sleep(Duration::from_millis(500));
+
+        if found_flag.load(Ordering::Relaxed) {
+             break;
+        }
+
+        let current = global_index.load(Ordering::Relaxed);
+        let done_since_start = current - actual_start_index;
+        let total = previous_total_checked + done_since_start;
+        
+        // Stats
+        let elapsed = start_time.elapsed().as_secs_f64();
+        if elapsed > 0.0 {
+            let speed = done_since_start as f64 / elapsed / 1_000_000.0;
+            print!("\rChecked: {:.1} M | Speed: {:.2} M/sec | Offset: {}   ",
+                total as f64 / 1_000_000.0,
                 speed,
-                current_linear_index
+                current
             );
             io::stdout().flush().ok();
         }
+
+        // Checkpoint
+        if last_ckpt.elapsed() >= Duration::from_secs(config.checkpoint_interval_secs) {
+            let _ = save_checkpoint(&config.checkpoint_file, current, total, &config.target_hash);
+            print!(" [💾]");
+            io::stdout().flush().ok();
+            last_ckpt = Instant::now();
+        }
+    }
+
+    // 5. FINISH
+    // Wait for threads (they should exit quickly after found_flag is true)
+    for h in handles {
+        let _ = h.join();
+    }
+
+    let guard = result_store.lock().unwrap();
+    if let Some(winning_idx) = *guard {
+        println!("\n\n!!! SUCCESS !!!");
+        println!("Target Found at Random Index: {}", winning_idx);
+        println!("(Use: python3 decode_result.py {} to get the password)", winning_idx);
+        let _ = fs::remove_file(&config.checkpoint_file);
+    } else {
+        println!("\nStopped without finding target.");
     }
 
     Ok(())

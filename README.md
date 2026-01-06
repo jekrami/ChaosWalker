@@ -1,13 +1,14 @@
-# 🌪️ ChaosWalker v1.0
+# 🌪️ ChaosWalker v1.2
 
-**GPU-Accelerated Password Cracker with Feistel Network and Smart Mapper**
+**GPU-Accelerated Password Cracker with Feistel Network, Smart Mapper, and Web Dashboard**
 
 > *"Walking through chaos, one hash at a time."*
 
-[![Version](https://img.shields.io/badge/version-1.0.0-blue.svg)](https://github.com/jekrami/ChaosWalker)
+[![Version](https://img.shields.io/badge/version-1.2.0-blue.svg)](https://github.com/jekrami/ChaosWalker)
 [![License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![CUDA](https://img.shields.io/badge/CUDA-12.x-76B900.svg)](https://developer.nvidia.com/cuda-toolkit)
 [![Rust](https://img.shields.io/badge/rust-1.70+-orange.svg)](https://www.rust-lang.org/)
+[![Flask](https://img.shields.io/badge/flask-3.0+-black.svg)](https://flask.palletsprojects.com/)
 
 ---
 
@@ -15,6 +16,7 @@
 
 - [Overview](#overview)
 - [Key Features](#key-features)
+- [Web Dashboard](#web-dashboard)
 - [Architecture](#architecture)
 - [Installation](#installation)
 - [Quick Start](#quick-start)
@@ -32,8 +34,10 @@ ChaosWalker is a **high-performance GPU-accelerated password cracker** that comb
 
 1. **Feistel Network** - Ensures exhaustive, non-repeating search through password space
 2. **Smart Mapper** - Optimized character ordering for 1,000-10,000x speedup on human passwords
-3. **Checkpoint System** - Never lose progress, resume from any point
-4. **CUDA Acceleration** - Harness the full power of modern GPUs
+3. **Web Dashboard** - Real-time monitoring with GPU telemetry and instant notifications
+4. **Checkpoint System** - Never lose progress, resume from any point
+5. **Multi-GPU Support** - Scales linearly across all available GPUs
+6. **CUDA Acceleration** - Harness the full power of modern hardware
 
 ### What Makes ChaosWalker Different?
 
@@ -84,11 +88,26 @@ Never lose progress again:
 - ✅ Survives crashes, reboots, power outages
 - ✅ Enables multi-day/week/month campaigns
 
-### 4. GPU Acceleration
+### 4. Web Dashboard (NEW in v1.2!)
 
-- **RTX 3090**: 1+ billion hashes/second
-- **RTX 4090**: 1.5+ billion hashes/second
-- **A100**: 2+ billion hashes/second
+Modern Flask-based web interface with:
+- 🎨 **Clean UI** - Dark theme, responsive design
+- 📊 **Live GPU Stats** - Temperature, load, VRAM (updates every 500ms)
+- 🚨 **Instant Alerts** - Browser popup when password found
+- 📝 **Real-time Logs** - Watch the engine work
+- 🎯 **Auto-hash** - Type password, hash generated automatically
+- 🛑 **Stop Button** - Graceful engine termination
+
+### 5. Multi-GPU Support
+- **Plug & Play**: Automatically detects multiple GPUs
+- **Load Balancing**: Faster cards take more work automatically
+- **Scalable**: 2x 3090s = 2x Speed
+
+### 6. GPU Acceleration
+
+- **RTX 3090**: 1+ billion hashes/second (per card)
+- **RTX 4090**: 1.5+ billion hashes/second (per card)
+- **A100**: 2+ billion hashes/second (per card)
 
 ---
 
@@ -194,6 +213,56 @@ graph LR
 
 ---
 
+## 🌐 Web Dashboard
+
+### Quick Start
+
+```bash
+# Install Python dependencies
+pip install flask toml
+
+# Start dashboard
+python flask_dashboard.py
+
+# Open browser
+http://localhost:5000
+```
+
+### Features
+
+- **Auto-hash Generator**: Type password → hash auto-generated
+- **GPU Telemetry**: Temperature, load, VRAM (live updates)
+- **Real-time Logs**: Watch engine output
+- **Alert Popup**: Instant notification when password found
+- **Stop Button**: Gracefully terminate search
+- **Mobile Friendly**: Responsive design works on phones
+
+### Screenshot
+
+```
+┌─────────────────────────────────────────┐
+│  🌪️ ChaosWalker Dashboard              │
+├─────────────────────────────────────────┤
+│  🎉 PASSWORD FOUND!                     │
+│      Password: admin                    │
+├─────────────────────────────────────────┤
+│  Target: [admin        ]                │
+│  Hash:   [8c6976e5...  ]                │
+│  [🚀 START] [🛑 STOP]                   │
+│  Status: 🎉 FOUND!                      │
+├─────────────────────────────────────────┤
+│  🖥️ GPU Telemetry                       │
+│  72°C    99%    695/24576 MB            │
+├─────────────────────────────────────────┤
+│  Logs:                                  │
+│  Engine started...                      │
+│  !!! SUCCESS !!!                        │
+│  Target Found at Index: 1065825710      │
+└─────────────────────────────────────────┘
+```
+
+---
+
 ## 📦 Installation
 
 ### Prerequisites
@@ -201,7 +270,8 @@ graph LR
 - **CUDA Toolkit** 12.x or later
 - **Rust** 1.70 or later
 - **NVIDIA GPU** with compute capability 7.0+ (RTX 20xx or newer)
-- **Python 3.8+** (for utilities)
+- **Python 3.8+** (for utilities and dashboard)
+- **Flask** (for web dashboard)
 
 ### Build from Source
 
@@ -213,7 +283,13 @@ cd ChaosWalker
 # Build release version
 cargo build --release
 
-# Run
+# Install Python dependencies
+pip install flask toml
+
+# Run dashboard (recommended)
+python flask_dashboard.py
+
+# Or run CLI
 cargo run --release
 ```
 
@@ -221,47 +297,55 @@ cargo run --release
 
 ## 🎮 Quick Start
 
-### 1. Set Your Target Hash
-
-Edit `src/main.rs`:
-
-```rust
-let target_hex = "YOUR_SHA256_HASH_HERE";
-```
-
-### 2. Run the Search
+### Method 1: Web Dashboard (Recommended)
 
 ```bash
+# 1. Start dashboard
+python flask_dashboard.py
+
+# 2. Open browser
+http://localhost:5000
+
+# 3. Enter password (e.g., "admin")
+#    Hash auto-generates!
+
+# 4. Click "🚀 START ENGINE"
+
+# 5. Watch real-time:
+#    - GPU stats update
+#    - Logs scroll
+#    - Alert pops up when found!
+
+# Result: Password displayed in big green box + alert popup
+```
+
+### Method 2: Command Line
+
+```bash
+# 1. Set target in config.toml
+target_hash = "YOUR_SHA256_HASH_HERE"
+
+# 2. Run engine
 cargo run --release
-```
 
-### 3. Decode the Result
-
-When found:
-
-```bash
+# 3. When found, decode result
 python3 decode_result.py <RANDOM_INDEX>
 ```
 
-### Example Session
+### Example Dashboard Session
 
 ```bash
-$ cargo run --release
+$ python flask_dashboard.py
+🌪️  ChaosWalker Flask Dashboard
+Starting server...
+Open: http://localhost:5000
 
-🆕 No checkpoint found. Starting from beginning.
-
-Target loaded. Engine started.
-Batch Size: 10000000 keys/cycle
-Checkpoint: Saving every 30 seconds to chaos_state.txt
-
-Checked: 50.0 M | Speed: 1234.56 M/sec | Offset: 50000000 [💾 Saved]
-
-!!! SUCCESS !!!
-Target Found at Random Index: 2203350344992287
-(Use: python3 decode_result.py 2203350344992287 to get the password)
-
-$ python3 decode_result.py 2203350344992287
-Password: 'VDKdrAQ5'
+# Browser:
+# 1. Type: "admin"
+# 2. Auto-hash: 8c6976e5b5410415...
+# 3. Click: START ENGINE
+# 4. Wait ~30 seconds
+# 5. 🎉 Alert popup: "PASSWORD FOUND! Password: admin"
 ```
 
 ---
@@ -365,6 +449,12 @@ cp chaos_state.txt chaos_state_backup.txt
 
 ## 📚 Utilities
 
+### Web Dashboard
+
+| File | Purpose |
+|------|---------|
+| `flask_dashboard.py` | **Web UI** - Real-time monitoring with GPU stats |
+
 ### Python Tools
 
 | Tool | Purpose |
@@ -392,6 +482,32 @@ Should complete in seconds on an RTX 3090!
 ---
 
 ## 📝 Changelog
+
+### v1.2.0 (2026-01-06) - Web Dashboard Release 🌐
+
+**New Features:**
+- ✨ **Flask Web Dashboard** - Modern web UI with real-time monitoring
+- ✨ **Live GPU Telemetry** - Temperature, load, VRAM updates every 500ms
+- ✨ **Instant Alerts** - Browser popup notification when password found
+- ✨ **Auto-hash Generator** - Type password, hash auto-generated
+- ✨ **Stop Button** - Graceful engine termination
+- ✨ **Mobile Responsive** - Works on phones and tablets
+
+**Improvements:**
+- 🚀 Simplified user experience - no need to edit config files
+- 🚀 Real-time visual feedback
+- 🚀 Dark theme UI for extended use
+- 📊 Better progress visualization
+
+**Files Added:**
+- `flask_dashboard.py` - Complete web dashboard
+- `show_result.sh` - Simple CLI wrapper script
+
+### v1.1.0 (2026-01-06) - Multi-GPU Support
+
+**New Features:**
+- ✨ **Multi-GPU Support** - Auto-detection and parallel processing
+- ✨ **Dynamic Load Balancing** - Work-stealing across GPUs
 
 ### v1.0.0 (2026-01-06) - Major Release 🎉
 

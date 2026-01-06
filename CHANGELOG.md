@@ -5,6 +5,54 @@ All notable changes to ChaosWalker will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-01-06
+
+### 🌐 Major Feature: Flask Web Dashboard
+
+ChaosWalker now includes a modern web dashboard for real-time monitoring and control, replacing the experimental Gradio interface.
+
+#### ✨ New Features
+- **Flask Web Dashboard**: Clean, responsive web UI with dark theme
+- **Live GPU Telemetry**: Temperature, load, and VRAM monitoring (updates every 500ms)
+- **Instant Alerts**: Browser popup notification when password found
+- **Auto-hash Generator**: Type password → SHA-256 hash auto-generated
+- **Stop Button**: Graceful engine termination with SIGTERM
+- **Mobile Responsive**: Works on phones, tablets, and desktops
+- **Real-time Logs**: Live engine output streaming to browser
+
+#### 🔧 Improvements
+- Simplified user experience - no need to edit config files manually
+- Better visual feedback with color-coded status indicators
+- More reliable result notifications (browser native alerts)
+- Reduced dependencies (Flask vs Gradio)
+
+#### 🗑️ Removed
+- Old Gradio-based `dashboard.py` (replaced by `flask_dashboard.py`)
+
+#### 📦 Dependencies
+- **Added**: `flask >= 3.0.0`
+- **Removed**: `gradio` (no longer needed)
+
+---
+
+## [1.1.0] - 2026-01-06
+
+### 🚀 Major Feature: Multi-GPU Support
+
+ChaosWalker now officially supports multi-GPU configurations, allowing linearly scalable performance across multiple NVIDIA devices.
+
+#### ✨ New Features
+- **Auto-Detection**: Automatically detects all compatible CUDA devices at startup.
+- **Parallel Workers**: Spawns independent threads for each GPU.
+- **Dynamic Load Balancing**: Uses atomic work-stealing to feed batches to GPUs based on their speed (faster GPUs get more work).
+- **Unified Checkpointing**: Coordinates progress across all GPUs into a single save file.
+- **Scalability**: Tested to scale almost linearly with added devices.
+
+#### 🔧 Improvements
+- **Refactored Main Loop**: Moved from a single-threaded loop to a `worker_thread` model.
+- **Thread Safety**: Introduced `Arc<AtomicU64>` and `Arc<AtomicBool>` for safe cross-thread communication.
+- **Clonable Config**: Configuration struct is now clonable for distribution to workers.
+
 ## [1.0.0] - 2026-01-06
 
 ### 🎉 Major Release - Production Ready

@@ -1,0 +1,6 @@
+# ChaosWalker Checkpoint File
+# DO NOT EDIT MANUALLY
+# Generated: 2026-01-06 19:44:45
+current_linear_index=266520000000
+total_passwords_checked=266520000000
+target_hash=240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9

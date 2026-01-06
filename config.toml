@@ -1,0 +1,6 @@
+target_hash = "8c6976e5b5410415bde908bd4dee15dfb167a9c873fc4bb8a81f6f2ab448a918"
+batch_size = 10000000
+known_password_length = 0
+gpu_ptx_path = "./kernels/chaos_worker_linear.ptx"
+checkpoint_file = "chaos_state.txt"
+checkpoint_interval_secs = 30
