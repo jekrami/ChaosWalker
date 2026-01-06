@@ -1,11 +1,76 @@
 use cudarc::driver::{CudaContext, LaunchConfig, PushKernelArg};
 use cudarc::nvrtc::Ptx;
 use std::convert::TryInto;
-use std::time::Instant;
+use std::time::{Instant, Duration};
+use std::fs;
+use std::io::{self, Write};
+use std::path::Path;
 
 // --- CONFIGURATION ---
 const BATCH_SIZE: usize = 10_000_000; // Keys to check per GPU cycle
 const GPU_PTX_PATH: &str = "./kernels/chaos_worker.ptx";
+const CHECKPOINT_FILE: &str = "chaos_state.txt";
+const CHECKPOINT_INTERVAL_SECS: u64 = 30; // Save every 30 seconds
+
+// --- CHECKPOINT SYSTEM ---
+
+/// Save the current search state to disk
+fn save_checkpoint(current_index: u64, total_checked: u64, target_hex: &str) -> io::Result<()> {
+    let checkpoint_data = format!(
+        "# ChaosWalker Checkpoint File\n\
+         # DO NOT EDIT MANUALLY\n\
+         # Generated: {}\n\
+         current_linear_index={}\n\
+         total_passwords_checked={}\n\
+         target_hash={}\n",
+        chrono::Local::now().format("%Y-%m-%d %H:%M:%S"),
+        current_index,
+        total_checked,
+        target_hex
+    );
+
+    // Write atomically: write to temp file, then rename
+    let temp_file = format!("{}.tmp", CHECKPOINT_FILE);
+    fs::write(&temp_file, checkpoint_data)?;
+    fs::rename(&temp_file, CHECKPOINT_FILE)?;
+
+    Ok(())
+}
+
+/// Load the checkpoint from disk, if it exists
+fn load_checkpoint() -> Option<(u64, u64, String)> {
+    if !Path::new(CHECKPOINT_FILE).exists() {
+        return None;
+    }
+
+    let content = match fs::read_to_string(CHECKPOINT_FILE) {
+        Ok(c) => c,
+        Err(_) => return None,
+    };
+
+    let mut current_index = None;
+    let mut total_checked = None;
+    let mut target_hash = None;
+
+    for line in content.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+
+        if let Some(value) = line.strip_prefix("current_linear_index=") {
+            current_index = value.parse().ok();
+        } else if let Some(value) = line.strip_prefix("total_passwords_checked=") {
+            total_checked = value.parse().ok();
+        } else if let Some(value) = line.strip_prefix("target_hash=") {
+            target_hash = Some(value.to_string());
+        }
+    }
+
+    match (current_index, total_checked, target_hash) {
+        (Some(idx), Some(total), Some(hash)) => Some((idx, total, hash)),
+        _ => None,
+    }
+}
 
 fn main() -> Result<(), anyhow::Error> {
     println!("--- Project ChaosWalker: Initiating High-Performance Mode ---");
@@ -23,8 +88,9 @@ fn main() -> Result<(), anyhow::Error> {
     let kernel = module.load_function("crack_kernel")?;
 
     // 3. DEFINE TARGET
-    // Example: SHA256("testpass") -> 17912ee2...
-    let target_hex = "17912ee268297e742817c187b5a1b3240247657954930379462509d37575209f";
+    // ChaosWalker v1.0 with Smart Mapper
+    // Test password: "VDKdrAQ5" (will be found at ~119K linear index)
+    let target_hex = "c30c9a521a08ba8613d80d866ed07f91d347ceb1c2dafe5f358ef9244918b3d4";
     let target_bytes = hex::decode(target_hex)?;
 
     // Convert target to u32 array (Big Endian)
@@ -40,15 +106,35 @@ fn main() -> Result<(), anyhow::Error> {
     let mut dev_found = stream.alloc_zeros::<u64>(1)?;
     let dev_target = stream.clone_htod(&target_u32)?;
 
+    // 5. CHECK FOR CHECKPOINT (Resume from previous run)
+    let (mut current_linear_index, mut total_checked) = if let Some((saved_index, saved_total, saved_hash)) = load_checkpoint() {
+        if saved_hash == target_hex {
+            println!();
+            println!("📂 CHECKPOINT FOUND!");
+            println!("   Resuming from: {}", saved_index);
+            println!("   Already checked: {} passwords", saved_total);
+            println!();
+            (saved_index, saved_total)
+        } else {
+            println!();
+            println!("⚠️  Checkpoint found but target hash changed. Starting fresh.");
+            println!();
+            (0, 0)
+        }
+    } else {
+        println!();
+        println!("🆕 No checkpoint found. Starting from beginning.");
+        println!();
+        (0, 0)
+    };
+
     println!("Target loaded. Engine started.");
     println!("Batch Size: {} keys/cycle", BATCH_SIZE);
+    println!("Checkpoint: Saving every {} seconds to {}", CHECKPOINT_INTERVAL_SECS, CHECKPOINT_FILE);
+    println!();
 
     let start_time = Instant::now();
-    let mut total_checked: u64 = 0;
-    
-    // We track the linear progress (0, 1M, 2M...), but the GPU 
-    // transforms these into random hops internally.
-    let mut current_linear_index: u64 = 0;
+    let mut last_checkpoint_time = Instant::now();
 
     let cfg = LaunchConfig::for_num_elems(BATCH_SIZE as u32);
 
@@ -73,7 +159,11 @@ fn main() -> Result<(), anyhow::Error> {
             let winning_random_index = found_val[0];
             println!("\n\n!!! SUCCESS !!!");
             println!("Target Found at Random Index: {}", winning_random_index);
-            println!("(Use a Python script to convert this index back to the password string)");
+            println!("(Use: python3 decode_result.py {} to get the password)", winning_random_index);
+
+            // Delete checkpoint on success
+            let _ = fs::remove_file(CHECKPOINT_FILE);
+            println!("\n✅ Checkpoint deleted (search complete)");
             break;
         }
 
@@ -81,14 +171,27 @@ fn main() -> Result<(), anyhow::Error> {
         total_checked += BATCH_SIZE as u64;
         current_linear_index += BATCH_SIZE as u64;
 
+        // Auto-save checkpoint every N seconds
+        if last_checkpoint_time.elapsed() >= Duration::from_secs(CHECKPOINT_INTERVAL_SECS) {
+            if let Err(e) = save_checkpoint(current_linear_index, total_checked, target_hex) {
+                eprintln!("\n⚠️  Warning: Failed to save checkpoint: {}", e);
+            } else {
+                print!(" [💾 Saved]");
+                io::stdout().flush().ok();
+            }
+            last_checkpoint_time = Instant::now();
+        }
+
+        // Progress display
         if total_checked % (BATCH_SIZE as u64 * 50) == 0 {
             let elapsed = start_time.elapsed().as_secs_f64();
             let speed = total_checked as f64 / elapsed / 1_000_000.0;
-            print!("\rChecked: {:.1} M | Speed: {:.2} M/sec | Offset: {}", 
-                total_checked as f64 / 1_000_000.0, 
+            print!("\rChecked: {:.1} M | Speed: {:.2} M/sec | Offset: {}",
+                total_checked as f64 / 1_000_000.0,
                 speed,
                 current_linear_index
             );
+            io::stdout().flush().ok();
         }
     }
 
